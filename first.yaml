@@ -1,0 +1,413 @@
+format_version: 9
+environments:
+  example:
+    pipelines:
+    - java-app-example-build
+    - java-app-example-deploy-sit
+    - java-app-example-deploy-uat
+    - java-app-example-deploy-prod
+common:
+  ## Environment Config
+  GROUP: &GROUP "EXAMPLE"
+  SLACK_WEBHOOK: &SLACK_WEBHOOK "https://hooks.slack.com/services/hsakdsfjbslabdsajbdapfkssvld"
+  APP_URL_SIT: &APP_URL_SIT "https://google.com/"
+  APP_URL_UAT: &APP_URL_UAT "https://google.com/"
+  APP_URL_PROD: &APP_URL_PROD "https://google.com/"
+
+  CLUSTER_SIT: &CLUSTER_SIT "arn:aws:eks:ap-southeast-1:11111111111:cluster/common-nonprod"
+  CLUSTER_UAT: &CLUSTER_UAT "arn:aws:eks:ap-southeast-1:22222222222:cluster/common-nonprod"
+  CLUSTER_PROD: &CLUSTER_PROD "arn:aws:eks:ap-southeast-1:333333333333:cluster/cg-common-prod"
+
+  RESOURCE_BUILDER: &RESOURCE_BUILDER "image-builder"
+  RESOURCE_SIT: &RESOURCE_SIT "cg-common"
+  RESOURCE_UAT: &RESOURCE_UAT "cg-common"
+  RESOURCE_PROD: &RESOURCE_PROD "cg-common-prod"
+
+  ##Material Config
+  APP_REPO: &APP_REPO
+    git: "git@bitbucket.org:centraltechnology/java-app-example.git"
+    shallow_clone: false
+    auto_update: true
+    branch: "master"
+    destination: java-app-example
+  INFRA_REPO: &INFRA_REPO
+    git: "git@bitbucket.org:centraltechnology/cto-infra.git"
+    shallow_clone: false
+    auto_update: true
+    branch: "master"
+    destination: cto-infra
+
+  ##Parameter Config
+  BU_NAME: &BU_NAME "common"
+  SERVICE_NAME: &SERVICE_NAME "java-app-example"
+  ECR: &ECR "1211221212112121.dkr.ecr.ap-southeast-1.amazonaws.com/common/java-app-example"
+  ECR_PROD: &ECR_PROD "121212121212121212121.dkr.ecr.ap-southeast-1.amazonaws.com/common/java-app-example"
+
+  ##Job Config
+  SELECT_CLUSTER: &SELECT_CLUSTER
+  - exec:
+      arguments:
+      - -c
+      - kubectl config use-context '#{CLUSTER}'
+      command: /bin/sh
+      run_if: passed
+  DEPLOY_JOB: &DEPLOY_JOB
+  - exec:
+      arguments:
+      - -c
+      - ./helm-upgrade.sh '#{BU_NAME}' '#{SERVICE_NAME}' '#{ENV_NAME}' ${GO_PIPELINE_LABEL}
+      command: bash
+      run_if: passed
+      working_directory: cto-infra/helm/java-app-example/scripts
+  CURL_TEST: &CURL_TEST
+  - exec:
+      arguments:
+      - -c
+      - curl '#{APP_URL}'
+      command: bash
+      run_if: passed
+  NOTI_SUCCESS: &NOTI_SUCCESS
+  - plugin:
+      configuration:
+        id: slack.task
+        version: '1'
+      options:
+        WebhookUrl: *SLACK_WEBHOOK
+        Message: |-
+          *Stage:* $GO_STAGE_NAME
+          *Job:* $GO_JOB_NAME
+          *Version:* $GO_PIPELINE_LABEL
+          *Pipeline:* $GO_SERVER_URL/tab/build/detail/$GO_PIPELINE_NAME/$GO_PIPELINE_COUNTER/$GO_STAGE_NAME/$GO_STAGE_COUNTER/$GO_JOB_NAME
+          *Triggered:* $GO_TRIGGER_USER
+        Channel: example
+        DisplayName: "$GO_PIPELINE_NAME"
+        Title: "Successfully"
+        ColorType: Good
+        ChannelType: Channel
+        IconOrEmoji: ':java:'
+      run_if: passed
+  NOTI_FAIL: &NOTI_FAIL
+  - plugin:
+      configuration:
+        id: slack.task
+        version: '1'
+      options:
+        WebhookUrl: *SLACK_WEBHOOK
+        Message: |-
+          *Stage:* $GO_STAGE_NAME
+          *Job:* $GO_JOB_NAME
+          *Version:* $GO_PIPELINE_LABEL
+          *Pipeline:* $GO_SERVER_URL/tab/build/detail/$GO_PIPELINE_NAME/$GO_PIPELINE_COUNTER/$GO_STAGE_NAME/$GO_STAGE_COUNTER/$GO_JOB_NAME
+          *Triggered:* $GO_TRIGGER_USER
+        Channel: example
+        DisplayName: "$GO_PIPELINE_NAME"
+        Title: "Failed"
+        ColorType: Danger
+        ChannelType: Channel
+        IconOrEmoji: ':java:'
+      run_if: failed
+pipelines:
+  java-app-example-build:
+    group: *GROUP
+    label_template: ${app-repo[:8]}
+    lock_behavior: unlockWhenFinished
+    display_order: -1
+    parameters:
+      ECR: *ECR
+    materials:
+      app-repo: *APP_REPO
+    stages:
+    - sonarqube:
+        fetch_materials: true
+        keep_artifacts: false
+        clean_workspace: true
+        approval:
+          type: success
+          allow_only_on_success: true
+        jobs:
+          sonarqube-scan:
+            timeout: 0
+            elastic_profile_id: *RESOURCE_BUILDER
+            tasks:
+            - exec:
+                arguments:
+                - -c
+                - docker build -f Dockerfile.sonar --rm .
+                command: bash
+                run_if: passed
+                working_directory: java-app-example
+            - *NOTI_FAIL
+    - report-portal:
+        fetch_materials: false
+        keep_artifacts: false
+        clean_workspace: false
+        approval:
+          type: success
+          allow_only_on_success: true
+        jobs:
+          report-portal-execute:
+            timeout: 0
+            elastic_profile_id: *RESOURCE_BUILDER
+            tasks:
+            - exec:
+                arguments:
+                - -c
+                - echo "report-portal"
+                command: bash
+                run_if: passed
+                working_directory: java-app-example
+            - *NOTI_FAIL
+    - build-push-image-nonprod:
+        fetch_materials: false
+        keep_artifacts: false
+        clean_workspace: false
+        approval:
+          type: success
+          allow_only_on_success: true
+        jobs:
+          docker-build-push-image-nonprod:
+            timeout: 0
+            elastic_profile_id: *RESOURCE_BUILDER
+            artifacts:
+            - external:
+                id: cg-common-java-app-example
+                store_id: cg-common
+                configuration:
+                  options:
+                    Tag: ${GO_PIPELINE_LABEL}
+                    Image: '#{ECR}'
+            tasks:
+            - exec:
+                arguments:
+                - -c
+                - docker build --no-cache -t '#{ECR}':${GO_PIPELINE_LABEL} -f Dockerfile.deploy .
+                command: bash
+                run_if: passed
+                working_directory: java-app-example
+            - exec:
+                arguments:
+                - -c
+                - trivy image '#{ECR}':${GO_PIPELINE_LABEL}
+                command: bash
+                run_if: passed
+            - *NOTI_SUCCESS
+            - *NOTI_FAIL
+  java-app-example-deploy-sit:
+    group: *GROUP
+    label_template: ${java-app-example-build}
+    lock_behavior: unlockWhenFinished
+    display_order: 0
+    parameters:
+      BU_NAME: *BU_NAME
+      SERVICE_NAME: *SERVICE_NAME
+      ENV_NAME: sit
+      CLUSTER: *CLUSTER_SIT
+      APP_URL: *APP_URL_SIT
+    materials:
+      infra-repo: *INFRA_REPO
+      java-app-example-build:
+        pipeline: java-app-example-build
+        stage: build-push-image-nonprod
+    stages:
+    - deploy:
+        fetch_materials: true
+        keep_artifacts: false
+        clean_workspace: true
+        approval:
+          type: manual
+          allow_only_on_success: true
+          roles:
+          - example
+        jobs:
+          helm-upgrade:
+            timeout: 0
+            resources:
+            - *RESOURCE_SIT
+            tasks:
+            - *SELECT_CLUSTER
+            - *DEPLOY_JOB
+            - *NOTI_SUCCESS
+            - *NOTI_FAIL
+    - integration-test:
+        fetch_materials: false
+        keep_artifacts: false
+        clean_workspace: false
+        approval:
+          type: success
+          allow_only_on_success: true
+        jobs:
+          curl:
+            timeout: 0
+            resources:
+            - *RESOURCE_SIT
+            tasks:
+            - *CURL_TEST
+            - *NOTI_FAIL
+  java-app-example-deploy-uat:
+    group: *GROUP
+    label_template: ${java-app-example-deploy-sit}
+    lock_behavior: unlockWhenFinished
+    display_order: 1
+    parameters:
+      BU_NAME: *BU_NAME
+      SERVICE_NAME: *SERVICE_NAME
+      ENV_NAME: uat
+      CLUSTER: *CLUSTER_UAT
+      APP_URL: *APP_URL_UAT
+      ECR: *ECR
+      ECR_PROD: *ECR_PROD
+    materials:
+      infra-repo: *INFRA_REPO
+      java-app-example-deploy-sit:
+        pipeline: java-app-example-deploy-sit
+        stage: integration-test
+      java-app-example-build:
+        pipeline: java-app-example-build
+        stage: build-push-image-nonprod
+    stages:
+    - deploy:
+        fetch_materials: true
+        keep_artifacts: false
+        clean_workspace: true
+        approval:
+          type: manual
+          allow_only_on_success: true
+          roles:
+          - example
+        jobs:
+          helm-upgrade:
+            timeout: 0
+            resources:
+            - *RESOURCE_UAT
+            tasks:
+            - *SELECT_CLUSTER
+            - *DEPLOY_JOB
+            - *NOTI_SUCCESS
+            - *NOTI_FAIL
+    - integration-test:
+        fetch_materials: false
+        keep_artifacts: false
+        clean_workspace: false
+        approval:
+          type: success
+          allow_only_on_success: true
+        jobs:
+          curl:
+            timeout: 0
+            resources:
+            - *RESOURCE_UAT
+            tasks:
+            - *CURL_TEST
+            - *NOTI_FAIL
+    - push-image-prod:
+        fetch_materials: true
+        keep_artifacts: false
+        clean_workspace: true
+        approval:
+          type: manual
+          allow_only_on_success: true
+          roles:
+          - example
+        jobs:
+          docker-push-image-prod:
+            timeout: 0
+            elastic_profile_id: *RESOURCE_BUILDER
+            artifacts:
+            - external:
+                id: cg-common-prod-java-app-example
+                store_id: cg-common-prod
+                configuration:
+                  options:
+                    Tag: ${GO_PIPELINE_LABEL}
+                    Image: '#{ECR_PROD}'
+            tasks:
+            - fetch:
+                artifact_origin: external
+                pipeline: java-app-example-build
+                stage: build-push-image-nonprod
+                job: docker-build-push-image-nonprod
+                artifact_id: cg-common-java-app-example
+                configuration:
+                  options:
+                    Tag: ${GO_PIPELINE_LABEL}
+                    Image: '#{ECR}'
+            - exec:
+                arguments:
+                - -c
+                - docker tag '#{ECR}':${GO_PIPELINE_LABEL} '#{ECR_PROD}':${GO_PIPELINE_LABEL}
+                command: bash
+                run_if: passed
+            - *NOTI_FAIL
+  java-app-example-deploy-prod:
+    group: *GROUP
+    label_template: ${java-app-example-deploy-uat}
+    lock_behavior: unlockWhenFinished
+    display_order: 2
+    parameters:
+      BU_NAME: *BU_NAME
+      SERVICE_NAME: *SERVICE_NAME
+      ENV_NAME: prod
+      CLUSTER: *CLUSTER_PROD
+      APP_URL: *APP_URL_PROD
+    materials:
+      infra-repo: *INFRA_REPO
+      java-app-example-deploy-uat:
+        pipeline: java-app-example-deploy-uat
+        stage: push-image-prod
+    stages:
+    - deploy:
+        fetch_materials: true
+        keep_artifacts: false
+        clean_workspace: true
+        approval:
+          type: manual
+          allow_only_on_success: true
+        jobs:
+          helm-upgrade:
+            timeout: 0
+            resources:
+            - *RESOURCE_PROD
+            tasks:
+            - *SELECT_CLUSTER
+            - *DEPLOY_JOB
+            - *NOTI_SUCCESS
+            - *NOTI_FAIL
+    - integration-test:
+        fetch_materials: false
+        keep_artifacts: false
+        clean_workspace: false
+        approval:
+          type: success
+          allow_only_on_success: true
+        jobs:
+          curl:
+            timeout: 0
+            resources:
+            - *RESOURCE_PROD
+            tasks:
+            - *CURL_TEST
+            - *NOTI_FAIL
+    - rollback:
+        fetch_materials: false
+        keep_artifacts: false
+        clean_workspace: false
+        approval:
+          type: manual
+          allow_only_on_success: true
+          roles:
+          - example
+        jobs:
+          helm-rollback:
+            timeout: 0
+            resources:
+            - *RESOURCE_PROD
+            tasks:
+            - exec:
+                arguments:
+                - -c
+                - ./helm-rollback.sh '#{SERVICE_NAME}' '#{ENV_NAME}'
+                command: bash
+                run_if: passed
+                working_directory: cto-infra/helm/java-app-example/scripts
+            - *NOTI_SUCCESS
+            - *NOTI_FAIL
